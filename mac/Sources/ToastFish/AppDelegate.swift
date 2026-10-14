@@ -8,6 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var database: Database?
     private var settings: AppSettings?
     private var bookItems: [NSMenuItem] = []
+    private var presenter: NotificationPresenter?
+    private var studyTask: Task<Void, Never>?
+    private var checkedAlertStyle = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let bundleID = Bundle.main.bundleIdentifier,
@@ -42,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let service = NotificationService()
         notifications = service
+        presenter = NotificationPresenter(notifications: service)
         installStatusItem()
         service.requestAuthorization()
     }
@@ -66,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(actionItem("开始！", action: #selector(showStub(_:))))
+        menu.addItem(actionItem("开始！", action: #selector(startStudy(_:))))
         menu.addItem(actionItem("导入单词", action: #selector(showStub(_:))))
         for (title, language) in [("英语词汇", BookLanguage.english), ("日语词汇", .japanese)] {
             let submenu = addSubmenu(title, to: menu)
@@ -83,9 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tests.addItem(actionItem(title, action: #selector(showStub(_:))))
         }
         let settings = addSubmenu("参数设置", to: menu)
-        for title in ["单词个数", "英标类型"] {
-            settings.addItem(actionItem(title, action: #selector(showStub(_:))))
-        }
+        settings.addItem(actionItem("单词个数", action: #selector(chooseWordNumber(_:))))
+        settings.addItem(actionItem("英标类型", action: #selector(chooseEngType(_:))))
         settings.addItem(toggleItem("自动播放", state: self.settings?.autoPlay == true ? .on : .off))
         settings.addItem(toggleItem("自动日志", state: self.settings?.autoLog == true ? .on : .off))
         settings.addItem(actionItem("重置进度", action: #selector(resetProgress(_:))))
@@ -137,6 +140,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             showDatabaseError(error)
         }
+    }
+
+    // MARK: Study
+
+    @objc private func startStudy(_ sender: NSMenuItem?) {
+        guard let database, let settings, let presenter, let notifications else { return }
+        guard notifications.isAvailable else {
+            showAlert("请使用打包后的 ToastFish.app 运行", info: "通知只能在应用包中使用，请先运行 scripts/build_app.sh。")
+            return
+        }
+        guard Books.catalog.first(where: { $0.tableName == settings.book })?.language == .english else {
+            notifications.post(title: "ToastFish", body: "功能开发中：日语词汇背诵")
+            return
+        }
+        let options = EnglishStudySession.Options(
+            book: settings.book, number: settings.wordNumber,
+            engType: settings.engType, autoPlay: settings.autoPlay
+        )
+        let previous = studyTask
+        previous?.cancel()
+        studyTask = Task { @MainActor [weak self] in
+            // Let the old session save its finished cards before the new one picks words.
+            await previous?.value
+            guard !Task.isCancelled, let self else { return }
+            guard await self.checkNotificationPermission(), !Task.isCancelled else { return }
+            let session = EnglishStudySession(database: database, presenter: presenter, options: options)
+            do {
+                let outcome = try await session.runSM2()
+                if outcome == .cancelled, let error = notifications.lastPostError {
+                    self.showAlert("通知发送失败，背诵已停止", info: error)
+                }
+            } catch {
+                self.showDatabaseError(error)
+            }
+        }
+    }
+
+    /// Requests permission on first use; refuses to start when notifications are off, and
+    /// once per launch points out that action buttons vanish with the banner style.
+    private func checkNotificationPermission() async -> Bool {
+        guard let notifications else { return false }
+        switch await notifications.ensurePermission() {
+        case .denied:
+            askToOpenNotificationSettings("通知权限未开启",
+                info: "ToastFish 通过通知推送单词。请在 系统设置 → 通知 → ToastFish 中允许通知，并把样式设为“提醒”。")
+            return false
+        case .allowed(let alertStyle):
+            if !alertStyle && !checkedAlertStyle {
+                checkedAlertStyle = true
+                askToOpenNotificationSettings("建议把 ToastFish 的通知样式设为“提醒”",
+                    info: "横幅样式的通知几秒后就会消失，按钮也随之隐藏。请在 系统设置 → 通知 → ToastFish 中选择“提醒”。")
+            }
+            return true
+        }
+    }
+
+    private func askToOpenNotificationSettings(_ message: String, info: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = info
+        alert.addButton(withTitle: "打开通知设置")
+        alert.addButton(withTitle: "稍后")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(Bundle.main.bundleIdentifier ?? "")") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: Settings
+
+    @objc private func chooseWordNumber(_ sender: NSMenuItem) {
+        guard let database, let settings else { return }
+        let options = [5, 10, 15, 20]
+        guard let index = choose("这次要背多少个？", options: options.map(String.init),
+                                 selected: options.firstIndex(of: settings.wordNumber)) else { return }
+        let old = settings.wordNumber
+        settings.wordNumber = options[index]
+        do {
+            try database.updateNumber(settings.wordNumber)
+            notifications?.post(title: "ToastFish", body: "已设置单词数量为：\(settings.wordNumber)")
+        } catch {
+            settings.wordNumber = old
+            showDatabaseError(error)
+        }
+    }
+
+    @objc private func chooseEngType(_ sender: NSMenuItem) {
+        guard let database, let settings else { return }
+        let names = ["美国", "英国"]
+        guard let index = choose("请选择发音类型？", options: names, selected: settings.engType == 1 ? 0 : 1) else { return }
+        let old = settings.engType
+        settings.engType = index == 0 ? 1 : 2
+        do {
+            try settings.save(to: database)
+            notifications?.post(title: "ToastFish", body: "已设置英语类型为：\(names[index])")
+        } catch {
+            settings.engType = old
+            showDatabaseError(error)
+        }
+    }
+
+    /// A small modal with a pop-up list, replacing the Windows toast selection box.
+    private func choose(_ message: String, options: [String], selected: Int?) -> Int? {
+        let alert = NSAlert()
+        alert.messageText = message
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 26), pullsDown: false)
+        popup.addItems(withTitles: options)
+        popup.selectItem(at: selected ?? 0)
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn ? popup.indexOfSelectedItem : nil
+    }
+
+    private func showAlert(_ message: String, info: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = info
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func toggle(_ sender: NSMenuItem) {
@@ -227,5 +353,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit(_ sender: NSMenuItem) {
         NSApp.terminate(nil)
+    }
+
+    /// Covers 退出, logout and shutdown: cancelling makes the session save the cards it already finished.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        notifications?.clearDelivered()
+        guard let task = studyTask else { return .terminateNow }
+        studyTask = nil
+        task.cancel()
+        Task { @MainActor in
+            await task.value
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
