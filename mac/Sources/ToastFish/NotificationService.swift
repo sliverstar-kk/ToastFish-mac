@@ -7,7 +7,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     private let center: UNUserNotificationCenter?
     /// The prompt waiting for an answer. Only one study prompt is on screen at a time.
     private var pending: (id: String, request: UNNotificationRequest, continuation: CheckedContinuation<String?, Never>,
-                          reposted: Bool)?
+                          actions: [PromptAction], reposted: Bool)?
     /// Set when a prompt could not be posted, so the caller can tell it apart from a cancel.
     private(set) var lastPostError: String?
 
@@ -105,7 +105,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 // Install the continuation before posting so an instant click can't be missed.
-                pending = (id, request, continuation, false)
+                pending = (id, request, continuation, prompt.actions, false)
                 if Task.isCancelled {
                     resolvePending(with: nil)
                     return
@@ -125,6 +125,25 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         } onCancel: {
             Task { @MainActor in self.resolvePending(id: id, with: nil) }
         }
+    }
+
+    /// ⌥1–⌥4: press the n-th button of the prompt on screen, like the Windows hotkeys.
+    func answerPending(buttonIndex: Int) {
+        guard let actions = pending?.actions, actions.indices.contains(buttonIndex) else { return }
+        answerByHotKey(actions[buttonIndex].id)
+    }
+
+    /// ⌥`: the 发音 button, when the prompt has one.
+    func answerPendingVoice() {
+        guard let voice = pending?.actions.first(where: { $0.id == "voice" }) else { return }
+        answerByHotKey(voice.id)
+    }
+
+    /// The notification stays on screen after a hotkey answer; remove it so its dead buttons don't linger.
+    private func answerByHotKey(_ actionID: String) {
+        guard let id = pending?.id else { return }
+        center?.removeDeliveredNotifications(withIdentifiers: [id])
+        resolvePending(with: actionID)
     }
 
     func clearDelivered() {

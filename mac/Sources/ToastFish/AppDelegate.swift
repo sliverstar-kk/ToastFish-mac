@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var presenter: NotificationPresenter?
     private var studyTask: Task<Void, Never>?
     private var checkedAlertStyle = false
+    private var hotKeys: HotKeys?
+    private var sessionToken = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let bundleID = Bundle.main.bundleIdentifier,
@@ -47,6 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notifications = service
         presenter = NotificationPresenter(notifications: service)
         installStatusItem()
+        let hotKeys = HotKeys()
+        self.hotKeys = hotKeys
+        if !hotKeys.register(.q, action: { [weak self] in self?.startStudy(nil) }) {
+            notifications?.post(title: "ToastFish", body: "快捷键 ⌥Q 已被其他程序占用")
+        }
         service.requestAuthorization()
     }
 
@@ -207,10 +214,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let previous = studyTask
         previous?.cancel()
+        sessionToken += 1
+        let token = sessionToken
         studyTask = Task { @MainActor [weak self] in
             // Let the old session save its finished cards before the new one picks words.
             await previous?.value
             guard !Task.isCancelled, let self else { return }
+            self.setSessionHotKeys(enabled: true)
+            defer { if self.sessionToken == token { self.setSessionHotKeys(enabled: false) } }
             guard await self.checkNotificationPermission(), !Task.isCancelled else { return }
             do {
                 let outcome = try await body(database, presenter)
@@ -220,6 +231,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 self.showDatabaseError(error)
             }
+        }
+    }
+
+    /// ⌥1–⌥4 and ⌥` are only taken while a session runs, so they type their usual characters otherwise.
+    private func setSessionHotKeys(enabled: Bool) {
+        guard let hotKeys else { return }
+        let buttons: [HotKeys.Key] = [.one, .two, .three, .four]
+        if enabled {
+            for (index, key) in buttons.enumerated() {
+                hotKeys.register(key) { [weak self] in self?.notifications?.answerPending(buttonIndex: index) }
+            }
+            hotKeys.register(.grave) { [weak self] in self?.notifications?.answerPendingVoice() }
+        } else {
+            (buttons + [.grave]).forEach(hotKeys.unregister)
         }
     }
 
@@ -367,7 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showShortcuts(_ sender: NSMenuItem) {
         let alert = NSAlert()
         alert.messageText = "快捷方式"
-        alert.informativeText = "⌥Q 开始内置单词学习\n⌥` 英语单词发音\n⌥1–⌥4 对应按钮1到4\n\n快捷键将在后续版本实现。"
+        alert.informativeText = "⌥Q 开始内置单词学习\n⌥` 英语单词发音\n⌥1–⌥4 对应按钮1到4\n\n⌥` 和 ⌥1–⌥4 只在背单词时生效，其余时间不占用这些按键。"
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
