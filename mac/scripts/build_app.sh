@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds mac/build/ToastFish.app (ad-hoc signed). Pass --zip to also produce a zip for sharing.
+# Builds a universal mac/build/ToastFish.app (ad-hoc signed). Pass --zip to also produce a zip for sharing.
 set -euo pipefail
 
 VERSION="1.0.0"
@@ -16,15 +16,21 @@ REPO_DIR="$(cd "$MAC_DIR/.." && pwd)"
 BUILD_DIR="$MAC_DIR/build"
 APP_DIR="$BUILD_DIR/ToastFish.app"
 
-swift build --package-path "$MAC_DIR" -c release
-BIN_DIR="$(swift build --package-path "$MAC_DIR" -c release --show-bin-path)"
+# Build each architecture separately and merge them, so the app runs on Apple silicon and Intel Macs.
+# (`swift build --arch a --arch b` needs Xcode's build system; per-triple builds work with only CLT.)
+BINARIES=()
+for arch in arm64 x86_64; do
+    triple="$arch-apple-macosx13.0"
+    swift build --package-path "$MAC_DIR" -c release --triple "$triple"
+    BINARIES+=("$(swift build --package-path "$MAC_DIR" -c release --triple "$triple" --show-bin-path)/ToastFish")
+done
 
 mkdir -p "$BUILD_DIR"
 STAGING_DIR="$(mktemp -d "$BUILD_DIR/.package.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 CONTENTS="$STAGING_DIR/ToastFish.app/Contents"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
-cp "$BIN_DIR/ToastFish" "$CONTENTS/MacOS/ToastFish"
+lipo -create "${BINARIES[@]}" -output "$CONTENTS/MacOS/ToastFish"
 
 ICONSET="$STAGING_DIR/AppIcon.iconset"
 mkdir -p "$ICONSET"
@@ -71,7 +77,7 @@ mv "$STAGING_DIR/ToastFish.app" "$APP_DIR"
 printf '已生成：%s\n' "$APP_DIR"
 
 if $MAKE_ZIP; then
-    ZIP_PATH="$BUILD_DIR/ToastFish-macOS-$VERSION-$(uname -m).zip"
+    ZIP_PATH="$BUILD_DIR/ToastFish-macOS-$VERSION.zip"
     rm -f "$ZIP_PATH"
     ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
     printf '已打包：%s\n' "$ZIP_PATH"

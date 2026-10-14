@@ -12,11 +12,11 @@ ToastFish 的原生 macOS 版本：常驻菜单栏，用系统通知推送单词
 
 ```sh
 mac/scripts/build_app.sh          # 生成 mac/build/ToastFish.app
-mac/scripts/build_app.sh --zip    # 另外生成 mac/build/ToastFish-macOS-<版本>-<架构>.zip
+mac/scripts/build_app.sh --zip    # 另外生成 mac/build/ToastFish-macOS-<版本>.zip，用来发给别人
 open mac/build/ToastFish.app
 ```
 
-脚本按本机架构编译 release 版本，生成图标，复制词库和资源，并做 ad-hoc 签名。可以把 `ToastFish.app` 拖进“应用程序”文件夹使用。
+脚本编译同时支持 Apple 芯片和 Intel 的通用版本，生成图标，复制词库和资源，并做 ad-hoc 签名。可以把 `ToastFish.app` 拖进“应用程序”文件夹使用。分享给别人时发 zip 文件即可，不需要源码。
 
 应用只有 ad-hoc 签名、没有经过公证。从网上下载或通过聊天工具收到的副本会被 Gatekeeper 拦下：第一次打开被拦后，到 **系统设置 → 隐私与安全性** 底部点“仍要打开”（macOS 13–14 也可以在 Finder 里右键 → 打开），或者执行：
 
