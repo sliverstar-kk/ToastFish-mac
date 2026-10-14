@@ -1,19 +1,30 @@
-# ToastFish macOS
+# ToastFish for macOS
 
-原生 macOS 菜单栏版本，使用 Swift 6、SwiftPM 和 AppKit，最低支持 macOS 13。只需要安装 Command Line Tools，无需 Xcode，也没有第三方依赖。
+ToastFish 的原生 macOS 版本：常驻菜单栏，用系统通知推送单词，在通知按钮上作答。功能与 Windows 版基本一致，词库和学习算法相同。
+
+- 最低系统：macOS 13 Ventura
+- 技术栈：Swift 6、SwiftPM、AppKit、UserNotifications，没有第三方依赖
+- 构建只需 Command Line Tools，不需要 Xcode
 
 ## 构建与运行
 
 在仓库根目录执行：
 
 ```sh
-mac/scripts/build_app.sh
+mac/scripts/build_app.sh          # 生成 mac/build/ToastFish.app
+mac/scripts/build_app.sh --zip    # 另外生成 mac/build/ToastFish-macOS-<版本>-<架构>.zip
 open mac/build/ToastFish.app
 ```
 
-打包脚本也可以从任意目录使用绝对路径运行。脚本按本机架构进行 release 构建，生成图标、复制资源，并对 `mac/build/ToastFish.app` 进行 ad-hoc 签名。重复执行会替换之前的应用包。
+脚本按本机架构编译 release 版本，生成图标，复制词库和资源，并做 ad-hoc 签名。可以把 `ToastFish.app` 拖进“应用程序”文件夹使用。
 
-单独编译和测试：
+应用只有 ad-hoc 签名、没有经过公证。从网上下载或通过聊天工具收到的副本会被 Gatekeeper 拦下：第一次打开被拦后，到 **系统设置 → 隐私与安全性** 底部点“仍要打开”（macOS 13–14 也可以在 Finder 里右键 → 打开），或者执行：
+
+```sh
+xattr -dr com.apple.quarantine /Applications/ToastFish.app
+```
+
+开发时单独编译和测试：
 
 ```sh
 cd mac
@@ -21,26 +32,44 @@ swift build
 swift test
 ```
 
-测试使用 Swift Testing。Package.swift 为仅安装 CLT 的环境补充测试框架与运行库路径；当前 CLT 的 Testing.framework 要求 macOS 14 或更高版本来运行测试，应用本身仍以 macOS 13 为部署目标。
+测试使用 Swift Testing。`Package.swift` 为只装了 Command Line Tools 的环境补上测试框架路径；这套框架运行测试需要 macOS 14 或更高版本，应用本身仍支持 macOS 13。
 
-验证应用签名：
+## 第一次使用
 
-```sh
-codesign -v mac/build/ToastFish.app
-```
+1. 点菜单栏的小鱼图标 → **开始！**，在弹窗中允许通知。
+2. 打开 **系统设置 → 通知 → ToastFish**，把样式设为 **提醒**。横幅样式几秒后就会消失，按钮也一起消失。
+3. macOS 把多个按钮收在通知的 **选项** 里，鼠标移到通知上即可看到。
 
-## 通知与当前功能
+完整说明见菜单 **使用说明 → 使用说明(必读)**。
 
-首次运行时请允许通知，并在 **系统设置 → 通知 → ToastFish** 中将通知样式设为 **提醒**，方便保留学习内容。点击任意词库可测试通知；点击“开始！”等尚未完成的功能，会显示“功能开发中：…”通知。
+## 功能对照
 
-请通过打包后的 `.app` 运行，启动需要包内数据库资源。通知服务在没有 bundle identifier 时只向 stderr 输出信息，不访问系统通知中心。
+| Windows 版 | macOS 版 |
+| --- | --- |
+| 托盘图标和右键菜单 | 菜单栏图标，菜单结构相同 |
+| Windows 通知按钮 | 带操作按钮的系统通知 |
+| 下拉框设置单词个数、英标类型 | 小弹窗选择 |
+| Alt+Q、Alt+1–4、Alt+~ | ⌥Q、⌥1–⌥4、⌥`（⌥1–4 和 ⌥` 只在背诵或测验进行时占用；⌥Q 一直占用） |
+| 有道发音 + Windows 语音 | 有道发音（缓存）+ 系统语音 |
+| 安装目录下的 Log 文件夹 | `~/Library/Application Support/ToastFish/Log`（菜单可直接打开） |
+| 导入 .xlsx / .xls | 只支持 .xlsx |
+| 启动文件夹快捷方式 | 系统登录项 |
 
-应用仅显示菜单栏图标，没有 Dock 图标。英语和日语词库共同使用单选状态，首次默认“四级核心词汇”。词库选择、“自动播放”和“自动日志”写入数据库，重启后恢复；选择词库会通知当前词库和学习进度。“重置进度”需确认后执行。“开机启动”目前仅切换内存中的勾选状态，不会修改系统登录项。
+另外修了几处原版的问题：中途重新开始或退出时会保存已经背完的词；五十音进度循环到最后一个后不会出错；导入日语和自定义 Excel 时不会漏掉最后一行。
 
-“使用说明(必读)”和“Star!!”打开打包的原始文件；原始说明针对 Windows，其中快捷键、通知按钮和学习流程将在后续版本实现。本阶段的“快捷方式”仅展示计划使用的快捷键；“单词个数”和“英标类型”的设置界面仍为占位，数据层已支持保存这些设置。
+## 数据位置
 
-## 数据层与 SM2
+| 内容 | 位置 |
+| --- | --- |
+| 学习进度（词库数据库） | `~/Library/Application Support/ToastFish/inami.db` |
+| 背诵记录 | `~/Library/Application Support/ToastFish/Log/` |
+| 发音缓存 | `~/Library/Caches/ToastFish/Mp3Cache/` |
 
-用户数据库保存在 `~/Library/Application Support/ToastFish/inami.db`。首次启动时自动创建，后续启动和应用更新都不会覆盖已有的用户数据库。
+数据库在第一次启动时从应用包复制出来，以后更新应用不会覆盖。**重置进度**把当前词库恢复为未学习、进度归零，保留词库内容和复习参数，不影响其他词库。
 
-“重置进度”会清除当前词库的学习状态，将词条恢复为未学习，并将进度计数归零；保留词库内容、难度、复习间隔、上次评分和复习时间，不影响其他词库。
+## 代码结构
+
+- `Sources/ToastFishCore`：与界面无关的部分，包括词库数据库、SM2 记忆算法、各种背诵和测验流程、Excel 读写。全部有单元测试。
+- `Sources/ToastFish`：菜单栏、通知、发音、快捷键、登录项。
+- `Tests/ToastFishCoreTests`：单元测试，用仓库里 `Resources/inami.db` 的临时副本运行。
+- `scripts/build_app.sh`：打包脚本。
