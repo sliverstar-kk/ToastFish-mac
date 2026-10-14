@@ -1,8 +1,10 @@
 import AppKit
+import ServiceManagement
 import ToastFishCore
+import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var notifications: NotificationService?
     private var database: Database?
@@ -13,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var checkedAlertStyle = false
     private var hotKeys: HotKeys?
     private var sessionToken = 0
+    private var launchItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let bundleID = Bundle.main.bundleIdentifier,
@@ -78,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(actionItem("开始！", action: #selector(startStudy(_:))))
-        menu.addItem(actionItem("导入单词", action: #selector(showStub(_:))))
+        menu.addItem(actionItem("导入单词", action: #selector(importWords(_:))))
         for (title, language) in [("英语词汇", BookLanguage.english), ("日语词汇", .japanese)] {
             let submenu = addSubmenu(title, to: menu)
             for book in Books.catalog where book.language == language {
@@ -99,12 +102,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.addItem(toggleItem("自动播放", state: self.settings?.autoPlay == true ? .on : .off))
         settings.addItem(toggleItem("自动日志", state: self.settings?.autoLog == true ? .on : .off))
         settings.addItem(actionItem("重置进度", action: #selector(resetProgress(_:))))
+        settings.addItem(.separator())
+        settings.addItem(actionItem("打开背诵记录文件夹", action: #selector(openLogFolder(_:))))
+        settings.addItem(actionItem("显示自定义模板", action: #selector(openTemplate(_:))))
         let help = addSubmenu("使用说明", to: menu)
         help.addItem(actionItem("快捷方式", action: #selector(showShortcuts(_:))))
         help.addItem(actionItem("使用说明(必读)", action: #selector(openInstructions(_:))))
         help.addItem(actionItem("官方网站", action: #selector(openWebsite(_:))))
         help.addItem(actionItem("Star!!", action: #selector(openStar(_:))))
-        menu.addItem(toggleItem("开机启动", state: .off))
+        let launchItem = actionItem("开机启动", action: #selector(toggleLaunchAtLogin(_:)))
+        self.launchItem = launchItem
+        menu.addItem(launchItem)
+        menu.delegate = self
         menu.addItem(actionItem("退出", action: #selector(quit(_:))))
         return menu
     }
@@ -159,17 +168,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let number = settings.wordNumber
         switch settings.book {
         case "Goin":
-            runSession { database, presenter in
-                try await JapaneseStudySession(database: database, presenter: presenter).runOrderedGoin(number: number)
+            runSession { [weak self] database, presenter in
+                let session = JapaneseStudySession(database: database, presenter: presenter)
+                defer { self?.writeLog(WordListIO.export(session.studiedGoin), kind: "五十音", empty: session.studiedGoin.isEmpty) }
+                return try await session.runOrderedGoin(number: number)
             }
         case "StdJp_Mid":
-            runSession { database, presenter in
-                try await JapaneseStudySession(database: database, presenter: presenter).runRecitation(number: number)
+            runSession { [weak self] database, presenter in
+                let session = JapaneseStudySession(database: database, presenter: presenter)
+                defer { self?.writeLog(WordListIO.export(session.studiedWords), kind: "日语", empty: session.studiedWords.isEmpty) }
+                return try await session.runRecitation(number: number)
             }
         default:
             let options = englishOptions(book: settings.book)
-            runSession { database, presenter in
-                try await EnglishStudySession(database: database, presenter: presenter, options: options).runSM2()
+            runSession { [weak self] database, presenter in
+                let session = EnglishStudySession(database: database, presenter: presenter, options: options)
+                defer { self?.writeLog(WordListIO.export(session.studiedWords), kind: "英语", empty: session.studiedWords.isEmpty) }
+                return try await session.runSM2()
             }
         }
     }
@@ -179,22 +194,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Like the original, a Japanese selection falls back to GRE words for this test (without changing the selection).
         let isEnglish = Books.catalog.first { $0.tableName == settings.book }?.language == .english
         let options = englishOptions(book: isEnglish ? settings.book : "GRE_2")
-        runSession { database, presenter in
-            try await EnglishStudySession(database: database, presenter: presenter, options: options).runRandomTest()
+        runSession { [weak self] database, presenter in
+            let session = EnglishStudySession(database: database, presenter: presenter, options: options)
+            defer { self?.writeLog(WordListIO.export(session.studiedWords), kind: "随机英语单词", empty: session.studiedWords.isEmpty) }
+            return try await session.runRandomTest()
         }
     }
 
     @objc private func randomGoinTest(_ sender: NSMenuItem) {
         guard let number = settings?.wordNumber else { return }
-        runSession { database, presenter in
-            try await JapaneseStudySession(database: database, presenter: presenter).runRandomGoin(number: number)
+        runSession { [weak self] database, presenter in
+            let session = JapaneseStudySession(database: database, presenter: presenter)
+            defer { self?.writeLog(WordListIO.export(session.studiedGoin), kind: "随机五十音", empty: session.studiedGoin.isEmpty) }
+            return try await session.runRandomGoin(number: number)
         }
     }
 
     @objc private func randomJpWordTest(_ sender: NSMenuItem) {
         guard let number = settings?.wordNumber else { return }
-        runSession { database, presenter in
-            try await JapaneseStudySession(database: database, presenter: presenter).runRandomTest(number: number)
+        runSession { [weak self] database, presenter in
+            let session = JapaneseStudySession(database: database, presenter: presenter)
+            defer { self?.writeLog(WordListIO.export(session.studiedWords), kind: "随机日语单词", empty: session.studiedWords.isEmpty) }
+            return try await session.runRandomTest(number: number)
+        }
+    }
+
+    // MARK: Import and logs
+
+    @objc private func importWords(_ sender: NSMenuItem) {
+        let panel = NSOpenPanel()
+        panel.title = "导入单词"
+        panel.message = "选择背诵记录或按自定义模板填写的 Excel 文件（.xlsx）"
+        panel.allowedContentTypes = [UTType(filenameExtension: "xlsx")].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }  // cancel is silent, as in #111
+        let imported: WordListIO.Imported
+        do {
+            imported = try WordListIO.importFile(Data(contentsOf: url))
+        } catch {
+            showAlert("导入文件出错！", info: error.localizedDescription)
+            return
+        }
+        switch imported {
+        case .english(let words):
+            guard let settings else { return }
+            // Quiz distractors come from a built-in book: the selected English one, or GRE like the original.
+            let isEnglish = Books.catalog.first { $0.tableName == settings.book }?.language == .english
+            let options = englishOptions(book: isEnglish ? settings.book : "GRE_2")
+            runSession { database, presenter in
+                try await EnglishStudySession(database: database, presenter: presenter, options: options)
+                    .runRecitation(words, allWords: database.allWords(book: options.book), persist: false)
+            }
+        case .japanese(let words):
+            runSession { database, presenter in
+                try await JapaneseStudySession(database: database, presenter: presenter).runRecitation(words: words, number: 0)
+            }
+        case .custom(let words):
+            runSession { _, presenter in await runCustomRecitation(words, presenter: presenter) }
+        }
+    }
+
+    private var logDirectory: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("ToastFish/Log", isDirectory: true)
+    }
+
+    /// Saves what a built-in session studied when 自动日志 is on; the files can be re-imported later.
+    private func writeLog(_ data: @autoclosure () -> Data, kind: String, empty: Bool) {
+        guard settings?.autoLog == true, !empty, let logDirectory else { return }
+        do {
+            try SessionLog.write(data(), kind: kind, to: logDirectory)
+        } catch {
+            notifications?.post(title: "ToastFish", body: "保存背诵记录失败：\(error.localizedDescription)")
+        }
+    }
+
+    @objc private func openLogFolder(_ sender: NSMenuItem) {
+        guard let logDirectory else { return }
+        try? FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(logDirectory)
+    }
+
+    @objc private func openTemplate(_ sender: NSMenuItem) {
+        guard let template = Bundle.main.url(forResource: "自定义模板", withExtension: "xlsx") else {
+            notifications?.post(title: "ToastFish", body: "找不到资源：自定义模板.xlsx，请使用打包后的应用。")
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([template])
+    }
+
+    // MARK: Launch at login
+
+    /// Login Items can change in System Settings, so read the state each time the menu opens.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        launchItem?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            showAlert("设置开机启动失败", info: error.localizedDescription)
+        }
+        sender.state = service.status == .enabled ? .on : .off
+        if service.status == .requiresApproval {
+            showAlert("需要在系统设置中允许", info: "请在 系统设置 → 通用 → 登录项 中允许 ToastFish。")
+            SMAppService.openSystemSettingsLoginItems()
         }
     }
 
@@ -337,10 +448,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggle(_ sender: NSMenuItem) {
-        guard sender.title == "自动播放" || sender.title == "自动日志" else {
-            sender.state = sender.state == .on ? .off : .on
-            return
-        }
         guard let database, let settings else { return }
         let oldPlay = settings.autoPlay
         let oldLog = settings.autoLog
@@ -383,10 +490,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
-    }
-
-    @objc private func showStub(_ sender: NSMenuItem) {
-        notifications?.post(title: "ToastFish", body: "功能开发中：\(sender.title)")
     }
 
     @objc private func showShortcuts(_ sender: NSMenuItem) {
