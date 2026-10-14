@@ -38,4 +38,8 @@ public protocol StudyPresenter: AnyObject {
     /// Waits like the original Thread.Sleep between quiz notifications.
     func pause(seconds: Double) async
     func pronounce(_ word: Word, engType: Int)
+    /// Reads Japanese text with a ja-JP voice.
+    func speakJapanese(_ text: String)
+    /// Plays the bundled Goin/<romaji>.mp3 recording.
+    func playGoin(_ romaji: String)
 }

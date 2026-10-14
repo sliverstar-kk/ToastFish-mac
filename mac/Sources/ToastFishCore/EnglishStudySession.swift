@@ -12,6 +12,12 @@ public struct StudyRandom: RandomNumberGenerator {
     public mutating func next() -> UInt64 { nextValue() }
 }
 
+public enum StudyOutcome: Equatable, Sendable {
+    case finished
+    case cancelled
+    case noWords
+}
+
 /// English study flows ported from PushWords.cs: RecitationSM2, Recitation and PushWaitAllQuestions.
 /// Runs on the main actor; the only suspension points are notifications and pauses.
 @MainActor
@@ -28,12 +34,6 @@ public final class EnglishStudySession {
             self.engType = engType
             self.autoPlay = autoPlay
         }
-    }
-
-    public enum Outcome: Equatable, Sendable {
-        case finished
-        case cancelled
-        case noWords
     }
 
     private let database: Database
@@ -56,7 +56,7 @@ public final class EnglishStudySession {
 
     // MARK: SM2 recitation (开始！ on an English book)
 
-    public func runSM2() async throws -> Outcome {
+    public func runSM2() async throws -> StudyOutcome {
         studiedWords = []
         let allWords = try database.allWords(book: options.book)
         var newCards = try database.generateRandomNewCardList(book: options.book, max: options.number)
@@ -125,7 +125,7 @@ public final class EnglishStudySession {
     }
 
     /// Finished cards are saved even when the user restarts mid-session (C# lost them).
-    private func cancel(saving finished: [Card]) throws -> Outcome {
+    private func cancel(saving finished: [Card]) throws -> StudyOutcome {
         try database.updateCards(finished)
         try database.updateTableCount(book: options.book)
         studiedWords = finished.map(\.word)
@@ -152,7 +152,7 @@ public final class EnglishStudySession {
     // MARK: Plain recitation (imported word lists)
 
     /// Ported from PushWords.Recitation. `persist` marks remembered words learned in `options.book`.
-    public func runRecitation(_ words: [Word], allWords: [Word], persist: Bool) async throws -> Outcome {
+    public func runRecitation(_ words: [Word], allWords: [Word], persist: Bool) async throws -> StudyOutcome {
         studiedWords = words
         if words.isEmpty {
             if persist { presenter.show("好..好像词库里没有单词了，您就是摸鱼之王！") }
@@ -190,6 +190,28 @@ public final class EnglishStudySession {
         presenter.show("背完了！接下来开始测验！")
         await presenter.pause(seconds: 3)
         guard await runQuiz(words, allWords: allWords) else { return .cancelled }
+        presenter.show("结束了！恭喜！")
+        return .finished
+    }
+
+    // MARK: Random test (随机单词测试, UnorderWord)
+
+    /// A translation quiz over `options.number` random words of the book, learned or not.
+    public func runRandomTest() async throws -> StudyOutcome {
+        let all = try database.allWords(book: options.book)
+        let list = Array(all.shuffled(using: &random).prefix(max(0, options.number)))
+        studiedWords = list
+        guard !list.isEmpty else { return .noWords }
+        var rng = random  // a stored property can't be passed inout across an await; copies share the stream
+        defer { random = rng }
+        let finished = await runRandomQuiz(list, presenter: presenter, random: &rng) { word, random in
+            let others = all.filter { $0.wordRank != word.wordRank && $0.headWord != word.headWord }
+            guard others.count >= 2 else { return nil }
+            return StudyContent.translationQuestion(
+                word, distractors: others.shuffled(using: &random).prefix(2).map(\.headWord),
+                answerIndex: Int.random(in: 0..<3, using: &random))
+        }
+        guard finished else { return .cancelled }
         presenter.show("结束了！恭喜！")
         return .finished
     }

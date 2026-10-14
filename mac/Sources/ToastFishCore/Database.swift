@@ -138,6 +138,11 @@ public final class Database {
 
     public func goinProgress() throws -> Int { try selectCount(book: "Goin").current }
 
+    /// Goin's Count.current is the 1-based position of the next kana to learn (C# UpdateCount, cyclic over 104).
+    public func setGoinProgress(_ position: Int) throws {
+        try execute("UPDATE Count SET current=? WHERE bookName='Goin'", [.int(position)])
+    }
+
     /// Like GetRandomWordList: cap at the number of unseen words; never fill with learned words.
     public func randomWords(book: String, n: Int) throws -> [Word] {
         Array(try allWords(book: book).filter { $0.status == 0 }.shuffled().prefix(max(0, n)))

@@ -83,9 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         let tests = addSubmenu("随机测试", to: menu)
-        for title in ["随机单词测试", "随机五十音测试", "随机日语单词测试"] {
-            tests.addItem(actionItem(title, action: #selector(showStub(_:))))
-        }
+        tests.addItem(actionItem("随机单词测试", action: #selector(randomWordTest(_:))))
+        tests.addItem(actionItem("随机五十音测试", action: #selector(randomGoinTest(_:))))
+        tests.addItem(actionItem("随机日语单词测试", action: #selector(randomJpWordTest(_:))))
         let settings = addSubmenu("参数设置", to: menu)
         settings.addItem(actionItem("单词个数", action: #selector(chooseWordNumber(_:))))
         settings.addItem(actionItem("英标类型", action: #selector(chooseEngType(_:))))
@@ -137,6 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 item.state = (item.representedObject as? String) == settings.book ? .on : .off
             }
             notifications?.post(title: "ToastFish", body: "当前词库：\(sender.title)\n当前进度：\(count.current)/\(count.total)")
+            if tableName == "StdJp_Mid" && !NotificationPresenter.hasJapaneseVoice {
+                showAlert("未检测到日语语音", info: "发音功能需要日语语音。请在 系统设置 → 辅助功能 → 朗读内容 → 系统声音 → 管理声音 中添加日语声音。")
+            }
         } catch {
             showDatabaseError(error)
         }
@@ -145,19 +148,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Study
 
     @objc private func startStudy(_ sender: NSMenuItem?) {
-        guard let database, let settings, let presenter, let notifications else { return }
+        guard let settings else { return }
+        let number = settings.wordNumber
+        switch settings.book {
+        case "Goin":
+            runSession { database, presenter in
+                try await JapaneseStudySession(database: database, presenter: presenter).runOrderedGoin(number: number)
+            }
+        case "StdJp_Mid":
+            runSession { database, presenter in
+                try await JapaneseStudySession(database: database, presenter: presenter).runRecitation(number: number)
+            }
+        default:
+            let options = englishOptions(book: settings.book)
+            runSession { database, presenter in
+                try await EnglishStudySession(database: database, presenter: presenter, options: options).runSM2()
+            }
+        }
+    }
+
+    @objc private func randomWordTest(_ sender: NSMenuItem) {
+        guard let settings else { return }
+        // Like the original, a Japanese selection falls back to GRE words for this test (without changing the selection).
+        let isEnglish = Books.catalog.first { $0.tableName == settings.book }?.language == .english
+        let options = englishOptions(book: isEnglish ? settings.book : "GRE_2")
+        runSession { database, presenter in
+            try await EnglishStudySession(database: database, presenter: presenter, options: options).runRandomTest()
+        }
+    }
+
+    @objc private func randomGoinTest(_ sender: NSMenuItem) {
+        guard let number = settings?.wordNumber else { return }
+        runSession { database, presenter in
+            try await JapaneseStudySession(database: database, presenter: presenter).runRandomGoin(number: number)
+        }
+    }
+
+    @objc private func randomJpWordTest(_ sender: NSMenuItem) {
+        guard let number = settings?.wordNumber else { return }
+        runSession { database, presenter in
+            try await JapaneseStudySession(database: database, presenter: presenter).runRandomTest(number: number)
+        }
+    }
+
+    private func englishOptions(book: String) -> EnglishStudySession.Options {
+        EnglishStudySession.Options(book: book, number: settings?.wordNumber ?? 10,
+                                    engType: settings?.engType ?? 2, autoPlay: settings?.autoPlay ?? true)
+    }
+
+    /// Replaces any running session with a new one. Only one study flow drives notifications at a time.
+    private func runSession(
+        _ body: @escaping @MainActor (Database, NotificationPresenter) async throws -> StudyOutcome
+    ) {
+        guard let database, let presenter, let notifications else { return }
         guard notifications.isAvailable else {
             showAlert("请使用打包后的 ToastFish.app 运行", info: "通知只能在应用包中使用，请先运行 scripts/build_app.sh。")
             return
         }
-        guard Books.catalog.first(where: { $0.tableName == settings.book })?.language == .english else {
-            notifications.post(title: "ToastFish", body: "功能开发中：日语词汇背诵")
-            return
-        }
-        let options = EnglishStudySession.Options(
-            book: settings.book, number: settings.wordNumber,
-            engType: settings.engType, autoPlay: settings.autoPlay
-        )
         let previous = studyTask
         previous?.cancel()
         studyTask = Task { @MainActor [weak self] in
@@ -165,9 +212,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await previous?.value
             guard !Task.isCancelled, let self else { return }
             guard await self.checkNotificationPermission(), !Task.isCancelled else { return }
-            let session = EnglishStudySession(database: database, presenter: presenter, options: options)
             do {
-                let outcome = try await session.runSM2()
+                let outcome = try await body(database, presenter)
                 if outcome == .cancelled, let error = notifications.lastPostError {
                     self.showAlert("通知发送失败，背诵已停止", info: error)
                 }

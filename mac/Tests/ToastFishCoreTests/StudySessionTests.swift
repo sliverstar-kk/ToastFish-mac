@@ -42,6 +42,14 @@ private final class ScriptedPresenter: StudyPresenter {
     func show(_ message: String) { messages.append(message) }
     func pause(seconds: Double) async {}
     func pronounce(_ word: Word, engType: Int) { pronounced.append(word.headWord) }
+    func speakJapanese(_ text: String) { pronounced.append(text) }
+    func playGoin(_ romaji: String) { pronounced.append(romaji) }
+}
+
+/// Answers any three-choice quiz by matching the expected answer text.
+@MainActor
+private func pick(_ prompt: StudyPrompt, _ answer: String) -> String {
+    prompt.actions.first { String($0.title.dropFirst(2)) == answer }!.id
 }
 
 /// Picks the right answer for quiz prompts by reading the word data back.
@@ -272,4 +280,120 @@ private func correctQuizAnswer(_ prompt: StudyPrompt, words: [Word]) -> String {
                                       options: .init(book: "CET4_1", number: 0, engType: 2, autoPlay: false))
     #expect(try await session.runSM2() == .noWords)
     #expect(presenter.messages == ["好..好像词库里没有单词了，您就是摸鱼之王！"])
+}
+
+@Test func goinQuestionsAskTheRightScript() {
+    let a = GoinWord(wordRank: 1, bookID: "goin", status: 0, hiragana: "あ", romaji: "a", katakana: "ア")
+    let i = GoinWord(wordRank: 2, bookID: "goin", status: 0, hiragana: "い", romaji: "i", katakana: "イ")
+    let u = GoinWord(wordRank: 3, bookID: "goin", status: 0, hiragana: "う", romaji: "u", katakana: "ウ")
+    let q0 = StudyContent.goinQuestion(a, distractors: [i, u], type: 0, answerIndex: 2)
+    #expect(q0.prompt.title == "选择平假名" && q0.prompt.body == "a")
+    #expect(q0.prompt.actions.map(\.title) == ["A.う", "B.い", "C.あ"] && q0.correctIndex == 2)
+    let q1 = StudyContent.goinQuestion(a, distractors: [i, u], type: 1, answerIndex: 0)
+    #expect(q1.prompt.body == "あ" && q1.prompt.actions.map(\.title) == ["A.ア", "B.イ", "C.ウ"])
+    let q2 = StudyContent.goinQuestion(a, distractors: [i, u], type: 2, answerIndex: 1)
+    #expect(q2.prompt.title == "选择片假名" && q2.prompt.body == "a" && q2.wrongMessage == "错误 正确答案：B.ア")
+}
+
+@MainActor
+@Test func orderedGoinAdvancesAndWrapsSavedPosition() async throws {
+    let (db, dir) = try temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let all = try db.allGoinWords()
+    try db.setGoinProgress(all.count - 1)  // two kana before the end
+    var voiced = false
+    let presenter = ScriptedPresenter { prompt in
+        if prompt.actions.map(\.id) == ["succeed", "voice"] {
+            if !voiced { voiced = true; return "voice" }
+            return "succeed"
+        }
+        let romaji = prompt.body
+        let word = all.first { $0.romaji == romaji || $0.hiragana == romaji }!
+        return pick(prompt, prompt.title == "选择平假名" ? word.hiragana : word.katakana)
+    }
+    let session = JapaneseStudySession(database: db, presenter: presenter, random: seeded(10))
+    #expect(try await session.runOrderedGoin(number: 3) == .finished)
+    #expect(session.studiedGoin.map(\.wordRank) == [all.count - 1, all.count, 1])
+    #expect(try db.goinProgress() == 2)
+    #expect(presenter.pronounced == [all[all.count - 2].romaji])
+    #expect(presenter.messages == ["背完了！接下来开始测验！", "结束了！恭喜！"])
+}
+
+@MainActor
+@Test func orderedGoinTreatsResetPositionAsFirstKana() async throws {
+    let (db, dir) = try temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try db.setGoinProgress(0)
+    let presenter = ScriptedPresenter { _ in nil }
+    let session = JapaneseStudySession(database: db, presenter: presenter)
+    #expect(try await session.runOrderedGoin(number: 1) == .cancelled)
+    #expect(presenter.prompts.first?.title == "平假名：あ 片假名：ア")
+}
+
+@MainActor
+@Test func japaneseRecitationPersistsAndQuizzes() async throws {
+    let (db, dir) = try temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let all = try db.allJpWords()
+    var wrongOnce = true
+    var voicedOnce = false
+    let presenter = ScriptedPresenter { prompt in
+        if prompt.actions.first?.id == "succeed" {
+            if !voicedOnce { voicedOnce = true; return "voice" }
+            return "succeed"
+        }
+        let candidates = Set(all.filter { $0.tranCN == prompt.body }.map(\.headWord))
+        let right = prompt.actions.first { candidates.contains(String($0.title.dropFirst(2))) }!.id
+        if wrongOnce { wrongOnce = false; return prompt.actions.first { $0.id != right }!.id }
+        return right
+    }
+    let session = JapaneseStudySession(database: db, presenter: presenter, random: seeded(11))
+    #expect(try await session.runRecitation(number: 3) == .finished)
+    #expect(session.studiedWords.count == 3)
+    let ranks = Set(session.studiedWords.map(\.wordRank))
+    #expect(try db.allJpWords().filter { ranks.contains($0.wordRank) }.allSatisfy { $0.status == 1 })
+    #expect(try db.selectCount(book: "StdJp_Mid").current == 3)
+    #expect(presenter.messages.contains { $0.hasPrefix("错误 正确答案：") })
+    #expect(presenter.messages.last == "结束了！恭喜！")
+    #expect(presenter.pronounced.count == 1)
+}
+
+@MainActor
+@Test func randomTestsDoNotChangeProgress() async throws {
+    let (db, dir) = try temporaryDatabase()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let english = try db.allWords(book: "CET4_1")
+    let goin = try db.allGoinWords()
+    let japanese = try db.allJpWords()
+    let presenter = ScriptedPresenter { prompt in
+        if prompt.title == "翻译" {
+            let candidates = Set(english.filter { $0.tranCN == prompt.body }.map(\.headWord)
+                                 + japanese.filter { $0.tranCN == prompt.body }.map(\.headWord))
+            return prompt.actions.first { candidates.contains(String($0.title.dropFirst(2))) }!.id
+        }
+        let word = goin.first { $0.romaji == prompt.body || $0.hiragana == prompt.body }!
+        return pick(prompt, prompt.title == "选择平假名" ? word.hiragana : word.katakana)
+    }
+    let englishSession = EnglishStudySession(database: db, presenter: presenter,
+        options: .init(book: "CET4_1", number: 4, engType: 2, autoPlay: false), random: seeded(12))
+    #expect(try await englishSession.runRandomTest() == .finished)
+    let japaneseSession = JapaneseStudySession(database: db, presenter: presenter, random: seeded(13))
+    #expect(try await japaneseSession.runRandomGoin(number: 4) == .finished)
+    #expect(try await japaneseSession.runRandomTest(number: 4) == .finished)
+    #expect(presenter.prompts.count == 12)  // every answer was right
+    #expect(try db.selectCount(book: "CET4_1").current == 0)
+    #expect(try db.goinProgress() == 1)
+}
+
+@MainActor
+@Test func customRecitationRequeuesSkippedCards() async {
+    let cards = [CustomizeWord(firstLine: "一", secondLine: "1"), CustomizeWord(firstLine: "二", secondLine: "2")]
+    var seen = 0
+    let presenter = ScriptedPresenter { _ in
+        seen += 1
+        return seen == 1 ? "fail" : "succeed"
+    }
+    #expect(await runCustomRecitation(cards, presenter: presenter) == .finished)
+    #expect(presenter.prompts.map(\.title) == ["一\n1", "二\n2", "一\n1"])
+    #expect(presenter.messages == ["背完了！"])
 }
