@@ -58,21 +58,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             notifications?.post(title: "ToastFish", body: "快捷键 ⌥Q 已被其他程序占用")
         }
         service.requestAuthorization()
+        service.post(title: "ToastFish 已启动", body: "点菜单栏上的小鱼图标打开菜单，或按 ⌥Q 开始背单词。看不到图标时，再次打开 ToastFish.app 会弹出菜单。")
+    }
+
+    /// Opening the app again (Finder, Dock, Spotlight) shows the menu at the pointer. On Macs with a notch
+    /// the status icon can be hidden when the menu bar is full, so this keeps the app reachable.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let menu = statusItem?.menu {
+            NSApp.activate(ignoringOtherApps: true)
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }
+        return false
     }
 
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem = item
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let image = NSImage(contentsOf: url) {
-            image.size = NSSize(width: 18, height: 18)
+        // A crisp monochrome glyph; the colour character icon turns into a blob as a template image.
+        if let image = NSImage(systemSymbolName: "fish", accessibilityDescription: "ToastFish") {
             image.isTemplate = true
             item.button?.image = image
         } else {
-            let image = NSImage(systemSymbolName: "fish", accessibilityDescription: "ToastFish")
-            image?.size = NSSize(width: 18, height: 18)
-            image?.isTemplate = true
-            item.button?.image = image
+            item.button?.title = "🐟"
         }
         item.button?.toolTip = "ToastFish"
         item.menu = makeMenu()
