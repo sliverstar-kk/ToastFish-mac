@@ -6,10 +6,11 @@ import Foundation
 // CLT ships Swift Testing outside the SDK framework search path.
 // Use a joined -I flag: SwiftPM forwards it to its generated test runner.
 // A test-target-only -F flag compiles tests but silently skips their execution.
+// Also pass -F for the Foundation cross-import overlay used by database/date tests.
 let cltFrameworks = "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
 let needsTestingFrameworkPath = FileManager.default.fileExists(atPath: "\(cltFrameworks)/Testing.framework")
 let testSwiftSettings: [SwiftSetting] = needsTestingFrameworkPath
-    ? [.unsafeFlags(["-I\(cltFrameworks)/Testing.framework/Modules"])] : []
+    ? [.unsafeFlags(["-I\(cltFrameworks)/Testing.framework/Modules", "-F", cltFrameworks])] : []
 let testLinkerSettings: [LinkerSetting] = needsTestingFrameworkPath
     ? [.linkedFramework("Testing"), .unsafeFlags(["-F", cltFrameworks, "-Xlinker", "-rpath", "-Xlinker", cltFrameworks,
                      "-Xlinker", "-rpath", "-Xlinker", "\(cltFrameworks)/../usr/lib"])] : []

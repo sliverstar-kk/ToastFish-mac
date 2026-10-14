@@ -5,7 +5,8 @@ import ToastFishCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var notifications: NotificationService?
-    private var selectedBook = "CET4_1"
+    private var database: Database?
+    private var settings: AppSettings?
     private var bookItems: [NSMenuItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -17,6 +18,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.addButton(withTitle: "好")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
+
+        do {
+            guard let bundledURL = Bundle.main.url(forResource: "inami", withExtension: "db") else {
+                throw DatabaseError.sqlite("找不到 inami.db，请使用打包后的应用。")
+            }
+            let support = try FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true
+            ).appendingPathComponent("ToastFish", isDirectory: true)
+            let url = try Database.prepareUserDatabase(bundledURL: bundledURL, appSupportDir: support)
+            let database = try Database(url: url)
+            settings = try AppSettings(database: database)
+            self.database = database
+        } catch {
+            showDatabaseError(error)
             NSApp.terminate(nil)
             return
         }
@@ -54,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for book in Books.catalog where book.language == language {
                 let item = actionItem(book.displayName, action: #selector(selectBook(_:)))
                 item.representedObject = book.tableName
-                item.state = book.tableName == selectedBook ? .on : .off
+                item.state = book.tableName == self.settings?.book ? .on : .off
                 submenu.addItem(item)
                 bookItems.append(item)
             }
@@ -67,10 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for title in ["单词个数", "英标类型"] {
             settings.addItem(actionItem(title, action: #selector(showStub(_:))))
         }
-        for title in ["自动播放", "自动日志"] {
-            settings.addItem(toggleItem(title))
-        }
-        settings.addItem(actionItem("重置进度", action: #selector(showStub(_:))))
+        settings.addItem(toggleItem("自动播放", state: self.settings?.autoPlay == true ? .on : .off))
+        settings.addItem(toggleItem("自动日志", state: self.settings?.autoLog == true ? .on : .off))
+        settings.addItem(actionItem("重置进度", action: #selector(resetProgress(_:))))
         let help = addSubmenu("使用说明", to: menu)
         help.addItem(actionItem("快捷方式", action: #selector(showShortcuts(_:))))
         help.addItem(actionItem("使用说明(必读)", action: #selector(openInstructions(_:))))
@@ -102,16 +120,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectBook(_ sender: NSMenuItem) {
-        guard let tableName = sender.representedObject as? String else { return }
-        selectedBook = tableName
-        for item in bookItems {
-            item.state = (item.representedObject as? String) == selectedBook ? .on : .off
+        guard let tableName = sender.representedObject as? String,
+              let database, let settings else { return }
+        do {
+            // Goin's current count is a cyclic counter, not derived from row status.
+            if tableName != "Goin" {
+                try database.updateTableCount(book: tableName)
+            }
+            let count = try database.selectCount(book: tableName)
+            try database.updateBookName(tableName)
+            settings.book = tableName
+            for item in bookItems {
+                item.state = (item.representedObject as? String) == settings.book ? .on : .off
+            }
+            notifications?.post(title: "ToastFish", body: "当前词库：\(sender.title)\n当前进度：\(count.current)/\(count.total)")
+        } catch {
+            showDatabaseError(error)
         }
-        notifications?.post(title: "ToastFish", body: "当前词库：\(sender.title)")
     }
 
     @objc private func toggle(_ sender: NSMenuItem) {
-        sender.state = sender.state == .on ? .off : .on
+        guard sender.title == "自动播放" || sender.title == "自动日志" else {
+            sender.state = sender.state == .on ? .off : .on
+            return
+        }
+        guard let database, let settings else { return }
+        let oldPlay = settings.autoPlay
+        let oldLog = settings.autoLog
+        if sender.title == "自动播放" { settings.autoPlay.toggle() }
+        if sender.title == "自动日志" { settings.autoLog.toggle() }
+        do {
+            try settings.save(to: database)
+        } catch {
+            settings.autoPlay = oldPlay
+            settings.autoLog = oldLog
+            showDatabaseError(error)
+            return
+        }
+        let enabled = sender.title == "自动播放" ? settings.autoPlay : settings.autoLog
+        sender.state = enabled ? .on : .off
+    }
+
+    @objc private func resetProgress(_ sender: NSMenuItem) {
+        guard let database, let settings,
+              let book = Books.catalog.first(where: { $0.tableName == settings.book }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "是否要重置“\(book.displayName)”的学习进度?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "重置")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try database.resetTableCount(book: book.tableName)
+            notifications?.post(title: "ToastFish", body: "重置\(book.displayName)完成！")
+        } catch {
+            showDatabaseError(error)
+        }
+    }
+
+    private func showDatabaseError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "数据库操作失败"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func showStub(_ sender: NSMenuItem) {
